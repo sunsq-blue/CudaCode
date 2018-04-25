@@ -8,6 +8,17 @@
  * sequentially iterates through vector elements on the host.
  */
 
+void CHECK(const cudaError_t error)
+{
+  if (error != cudaSuccess)
+  {
+    fprintf(stderr, "Error: %s:%s:%d, ", __FILE__, __func__, __LINE__);
+    fprintf(stderr, "code:%d, reason: %s\n", error, cudaGetErrorString(error));
+    exit(EXIT_FAILURE);
+  }
+}
+
+
 __global__ 
 void checkIndex(void)
 {
@@ -18,14 +29,15 @@ void checkIndex(void)
 
 
 __global__
-void sumArrays(float *A, float *B, float *C)
+void sumArrays(float *A, float *B, float *C, unsigned int N)
 {
-    unsigned int idx = threadIdx.x;
-    C[idx] = A[idx] + B[idx];
+    unsigned int idx = blockIdx.x*blockDim.x + threadIdx.x;
+    if (idx < N)    
+      C[idx] = A[idx] + B[idx];
 }
 
 __host__
-void initialData(float *ip, int size)
+void initialData(float *ip, unsigned int size)
 {
     // generate different seed for random number
     time_t t;
@@ -41,9 +53,12 @@ void initialData(float *ip, int size)
 __host__
 int main(int argc, char **argv)
 {
-    int nElem = 6;
+    int deviceId = 0;
+    cudaSetDevice(deviceId);
+
+    unsigned int nElem = 1<<24;
     size_t nBytes = nElem * sizeof(float);
-    printf("%d elements, %zu B\n", nElem, nBytes);
+    printf("%u elements, %zu B\n", nElem, nBytes);
 
     //Allocate vectors in host memory
     float *h_A, *h_B, *h_C, *gpuRef;
@@ -54,53 +69,61 @@ int main(int argc, char **argv)
 
     //Allocate vectors in device memory
     float *d_A, *d_B, *d_C;
-    cudaMalloc(&d_A, nBytes);
-    cudaMalloc(&d_B, nBytes);
-    cudaMalloc(&d_C, nBytes);
+    CHECK(cudaMalloc(&d_A, nBytes));
+    CHECK(cudaMalloc(&d_B, nBytes));
+    CHECK(cudaMalloc(&d_C, nBytes));
     
     initialData(h_A, nElem);
     initialData(h_B, nElem);
 
     //Copy the vector data over the device memory
-    cudaError_t success = cudaMemcpy(d_A, h_A, nBytes, cudaMemcpyHostToDevice);
-    
-    if (success != cudaSuccess) //Sample error handling code
-    {
-      const char *e = cudaGetErrorString(success);
-      fprintf(stderr, "%s\n", e);
-      exit(EXIT_FAILURE); 
-    }
+    CHECK(cudaMemcpy(d_A, h_A, nBytes, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_B, h_B, nBytes, cudaMemcpyHostToDevice));
 
-    cudaMemcpy(d_B, h_B, nBytes, cudaMemcpyHostToDevice);
+    int deviceCount = 0, maxDevice = 0;
+    unsigned long long maxMemory = 0;
+    CHECK(cudaGetDeviceCount(&deviceCount));
+    printf("Number of devices: %d\n", deviceCount);
+    if (deviceCount > 1)
+    {
+      int device;
+      for (device = 0; device < deviceCount; device++)
+      {
+        cudaDeviceProp props;
+        CHECK(cudaGetDeviceProperties(&props, device));
+        if (maxMemory < props.totalGlobalMem)
+        {
+          maxMemory = props.totalGlobalMem;
+          maxDevice = device;  
+        }
+      }
+      CHECK(cudaSetDevice(maxDevice));
+      printf("Device with largest total global memory: %d (%llu B)\n", maxDevice, maxMemory);
+    }
+   
+    //cudaDeviceProp prop;
+    //CHECK(cudaGetDeviceProperties(&prop,
 
     //Define the grid and block dimensions
-    dim3 block(3); 
+    unsigned int blockSize = 1024; 
+    dim3 block(blockSize); 
     dim3 grid((nElem + block.x-1)/block.x);
     printf("Block dim3: <%d %d %d>\n", block.x, block.y, block.z);
     printf("Grid dim3: <%d %d %d>\n", grid.x, grid.y, grid.z);
+    unsigned int totalThreads = block.x*block.y*block.z*grid.x*grid.y*grid.z;
+    printf("Total threads: %u\n", totalThreads);
 
     //Invoke the kernel on the device
-    checkIndex<<<grid, block>>>();
+    //checkIndex<<<grid, block>>>();
    
     //All kernel invocations must return from device
     //before control returns to the host
-    cudaDeviceSynchronize(); 
+    //cudaDeviceSynchronize(); 
 
-    sumArrays<<<1, nElem>>>(d_A, d_B, d_C);
+    sumArrays<<<grid, block>>>(d_A, d_B, d_C, nElem);
 
     //Copy the result vector back to the host
-    cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost);
-
-    int i; 
-    for (i = 0; i < nElem; i++)
-      fprintf(stdout, "%f ", h_A[i]); 
-    fprintf(stdout, "\n");
-    for (i = 0; i < nElem; i++)
-      fprintf(stdout, "%f ", h_B[i]); 
-    fprintf(stdout, "\n");
-    for (i = 0; i < nElem; i++)
-      fprintf(stdout, "%f ", gpuRef[i]); 
-    fprintf(stdout, "\n");
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
 
     //Deallocate the device memory vectors
     cudaFree(d_A);
