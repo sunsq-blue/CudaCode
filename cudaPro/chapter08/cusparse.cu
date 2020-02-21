@@ -8,7 +8,7 @@
  * This is an example demonstrating usage of the cuSPARSE library to perform a
  * sparse matrix-vector multiplication on randomly generated data.
  */
-
+//开始解析
 /*
  * M = # of rows
  * N = # of columns
